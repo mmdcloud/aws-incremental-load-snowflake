@@ -1,6 +1,6 @@
 # Registering vault provider
-data "vault_generic_secret" "redshift" {
-  path = "secret/redshift"
+data "vault_generic_secret" "snowflake" {
+  path = "secret/snowflake"
 }
 
 resource "random_id" "id" {
@@ -21,14 +21,14 @@ module "vpc" {
 }
 
 # Security Group
-module "redshift_security_group" {
+module "snowflake_security_group" {
   source = "./modules/vpc/security_groups"
   vpc_id = module.vpc.vpc_id
-  name   = "redshift-security-group"
+  name   = "snowflake-security-group"
   ingress = [
     {
-      from_port       = 5439
-      to_port         = 5439
+      from_port       = 443
+      to_port         = 443
       protocol        = "tcp"
       self            = "false"
       cidr_blocks     = ["0.0.0.0/0"]
@@ -137,6 +137,20 @@ module "private_rt" {
 }
 
 # -----------------------------------------------------------------------------------------
+# Secrets Manager
+# -----------------------------------------------------------------------------------------
+module "snowflake_credentials" {
+  source                  = "./modules/secrets-manager"
+  name                    = "snowflake_credentials"
+  description             = "snowflake_credentials"
+  recovery_window_in_days = 0
+  secret_string = jsonencode({
+    USERNAME = tostring(data.vault_generic_secret.snowflake.data["username"])
+    PASSWORD = tostring(data.vault_generic_secret.snowflake.data["password"])
+  })
+}
+
+# -----------------------------------------------------------------------------------------
 # VPC Endpoint Configuration
 # -----------------------------------------------------------------------------------------
 
@@ -156,7 +170,7 @@ resource "aws_vpc_endpoint" "kms_endpoint" {
   service_name       = "com.amazonaws.${var.region}.kms"
   vpc_endpoint_type  = "Interface"
   subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.redshift_security_group.id]
+  security_group_ids = [module.snowflake_security_group.id]
 
   tags = {
     Name = "kms-endpoint"
@@ -168,31 +182,31 @@ resource "aws_vpc_endpoint" "sts_endpoint" {
   service_name       = "com.amazonaws.${var.region}.sts"
   vpc_endpoint_type  = "Interface"
   subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.redshift_security_group.id]
+  security_group_ids = [module.snowflake_security_group.id]
 
   tags = {
     Name = "sts-endpoint"
   }
 }
 
-resource "aws_vpc_endpoint" "redshift_endpoint" {
-  vpc_id             = module.vpc.vpc_id
-  service_name       = "com.amazonaws.${var.region}.redshift"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.redshift_security_group.id]
+# resource "aws_vpc_endpoint" "redshift_endpoint" {
+#   vpc_id             = module.vpc.vpc_id
+#   service_name       = "com.amazonaws.${var.region}.redshift"
+#   vpc_endpoint_type  = "Interface"
+#   subnet_ids         = module.public_subnets.subnets[*].id
+#   security_group_ids = [module.snowflake_security_group.id]
 
-  tags = {
-    Name = "redshift-endpoint"
-  }
-}
+#   tags = {
+#     Name = "redshift-endpoint"
+#   }
+# }
 
 resource "aws_vpc_endpoint" "secrets_manager_endpoint" {
   vpc_id             = module.vpc.vpc_id
   service_name       = "com.amazonaws.${var.region}.secretsmanager"
   vpc_endpoint_type  = "Interface"
   subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.redshift_security_group.id]
+  security_group_ids = [module.snowflake_security_group.id]
 
   tags = {
     Name = "secrets-manager-endpoint"
@@ -252,28 +266,28 @@ module "glue_etl_script_bucket" {
 # -----------------------------------------------------------------------------------------
 # Redshift Configuration
 # -----------------------------------------------------------------------------------------
-module "redshift_serverless" {
-  source              = "./modules/redshift"
-  namespace_name      = "incremental-load-namespace"
-  admin_username      = data.vault_generic_secret.redshift.data["username"]
-  admin_user_password = data.vault_generic_secret.redshift.data["password"]
-  db_name             = "incremental-load-db"
-  workgroups = [
-    {
-      workgroup_name      = "incremental-load-workgroup"
-      base_capacity       = 128
-      publicly_accessible = false
-      subnet_ids          = module.public_subnets.subnets[*].id
-      security_group_ids  = [module.redshift_security_group.id]
-      config_parameters = [
-        {
-          parameter_key   = "enable_user_activity_logging"
-          parameter_value = "true"
-        }
-      ]
-    }
-  ]
-}
+# module "redshift_serverless" {
+#   source              = "./modules/redshift"
+#   namespace_name      = "incremental-load-namespace"
+#   admin_username      = data.vault_generic_secret.redshift.data["username"]
+#   admin_user_password = data.vault_generic_secret.redshift.data["password"]
+#   db_name             = "incremental-load-db"
+#   workgroups = [
+#     {
+#       workgroup_name      = "incremental-load-workgroup"
+#       base_capacity       = 128
+#       publicly_accessible = false
+#       subnet_ids          = module.public_subnets.subnets[*].id
+#       security_group_ids  = [module.snowflake_security_group.id]
+#       config_parameters = [
+#         {
+#           parameter_key   = "enable_user_activity_logging"
+#           parameter_value = "true"
+#         }
+#       ]
+#     }
+#   ]
+# }
 
 # -----------------------------------------------------------------------------------------
 # Glue Configuration
@@ -341,22 +355,29 @@ resource "aws_glue_crawler" "crawler" {
   }
 }
 
-resource "aws_glue_connection" "redshift_conn" {
-  name            = "redshift-connection"
-  description     = "Glue connection to Amazon Redshift"
-  connection_type = "JDBC"
+resource "aws_glue_connection" "snowflake_conn" {
+  name            = "snowflake-connection"
+  description     = "Glue connection for Snowflake"
+  connection_type = "SNOWFLAKE"
 
-  # Connection properties for Redshift
+  # Connection properties for Snowflake
   connection_properties = {
-    JDBC_CONNECTION_URL = "jdbc:redshift://${tostring(module.redshift_serverless.endpoint)}:5439/incremental-load-db"
-    USERNAME            = "${data.vault_generic_secret.redshift.data["username"]}"
-    PASSWORD            = "${data.vault_generic_secret.redshift.data["password"]}"
-    # Optionally, use AWS Secrets Manager for credentials
-    # SECRET_ID         = "<aws_secretsmanager_secret_arn>"
+    JDBC_ENFORCE_SSL       = "true"
+    SNOWFLAKE_URL          = "OWACNSJ-HF93265.snowflakecomputing.com"
+    WAREHOUSE              = "COMPUTE_WH"
+    DATABASE               = "AWSDB"
+    ROLE                   = "ACCOUNTADMIN"
+    AWS_SECRET_ID          = "${module.snowflake_credentials.arn}"
+
+    # JDBC_CONNECTION_URL = "jdbc:snowflake://${var.snowflake_account}.snowflakecomputing.com/?warehouse=${var.snowflake_warehouse}&db=${var.snowflake_database}&schema=${var.snowflake_schema}"
+    # USERNAME            = "${data.vault_generic_secret.snowflake.data["username"]}"
+    # PASSWORD            = "${data.vault_generic_secret.snowflake.data["password"]}"
+    # JDBC_DRIVER_JAR_URI = "s3://${aws_s3_bucket.glue_resources.bucket}/jdbc/snowflake-jdbc-3.13.22.jar"
+    # JDBC_DRIVER_CLASS_NAME = "net.snowflake.client.jdbc.SnowflakeDriver"    
   }
   physical_connection_requirements {
     subnet_id              = module.public_subnets.subnets[0].id
-    security_group_id_list = [module.redshift_security_group.id]
+    security_group_id_list = [module.snowflake_security_group.id]
     availability_zone      = module.public_subnets.subnets[0].availability_zone
   }
 }
