@@ -7,17 +7,17 @@ variable "region" {
 variable "glue_database_name" {
   description = "The name of the Glue database"
   type        = string
-  default     = "incremental_load_db"
+  default     = "fifa"
 }
 
 variable "glue_table_name" {
   description = "The name of the Glue table"
   type        = string
-  default     = "incremental_load_table"
+  default     = "players"
 }
 
 variable "glue_crawler_name" {
   description = "The name of the Glue crawler"
   type        = string
-  default     = "incremental_load_crawler"
+  default     = "fifa-crawler"
 }

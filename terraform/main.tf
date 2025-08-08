@@ -71,18 +71,6 @@ module "public_subnets" {
     {
       subnet = "10.0.3.0/24"
       az     = "${var.region}c"
-    },
-    {
-      subnet = "10.0.4.0/24"
-      az     = "${var.region}d"
-    },
-    {
-      subnet = "10.0.5.0/24"
-      az     = "${var.region}e"
-    },
-    {
-      subnet = "10.0.6.0/24"
-      az     = "${var.region}f"
     }
   ]
   vpc_id                  = module.vpc.vpc_id
@@ -95,15 +83,15 @@ module "private_subnets" {
   name   = "private-subnet"
   subnets = [
     {
-      subnet = "10.0.7.0/24"
+      subnet = "10.0.4.0/24"
       az     = "${var.region}a"
     },
     {
-      subnet = "10.0.8.0/24"
+      subnet = "10.0.5.0/24"
       az     = "${var.region}b"
     },
     {
-      subnet = "10.0.9.0/24"
+      subnet = "10.0.6.0/24"
       az     = "${var.region}c"
     }
   ]
@@ -139,6 +127,7 @@ module "private_rt" {
 # -----------------------------------------------------------------------------------------
 # Secrets Manager
 # -----------------------------------------------------------------------------------------
+
 module "snowflake_credentials" {
   source                  = "./modules/secrets-manager"
   name                    = "snowflake_credentials"
@@ -165,61 +154,18 @@ resource "aws_vpc_endpoint" "s3_endpoint" {
   }
 }
 
-resource "aws_vpc_endpoint" "kms_endpoint" {
-  vpc_id             = module.vpc.vpc_id
-  service_name       = "com.amazonaws.${var.region}.kms"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.snowflake_security_group.id]
-
-  tags = {
-    Name = "kms-endpoint"
-  }
-}
-
-resource "aws_vpc_endpoint" "sts_endpoint" {
-  vpc_id             = module.vpc.vpc_id
-  service_name       = "com.amazonaws.${var.region}.sts"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.snowflake_security_group.id]
-
-  tags = {
-    Name = "sts-endpoint"
-  }
-}
-
-# resource "aws_vpc_endpoint" "redshift_endpoint" {
-#   vpc_id             = module.vpc.vpc_id
-#   service_name       = "com.amazonaws.${var.region}.redshift"
-#   vpc_endpoint_type  = "Interface"
-#   subnet_ids         = module.public_subnets.subnets[*].id
-#   security_group_ids = [module.snowflake_security_group.id]
-
-#   tags = {
-#     Name = "redshift-endpoint"
-#   }
-# }
-
-resource "aws_vpc_endpoint" "secrets_manager_endpoint" {
-  vpc_id             = module.vpc.vpc_id
-  service_name       = "com.amazonaws.${var.region}.secretsmanager"
-  vpc_endpoint_type  = "Interface"
-  subnet_ids         = module.public_subnets.subnets[*].id
-  security_group_ids = [module.snowflake_security_group.id]
-
-  tags = {
-    Name = "secrets-manager-endpoint"
-  }
-}
-
 # -----------------------------------------------------------------------------------------
 # S3 Configuration
 # -----------------------------------------------------------------------------------------
 module "source_bucket" {
-  source             = "./modules/s3"
-  bucket_name        = "source-bucket-${random_id.id.hex}"
-  objects            = []
+  source      = "./modules/s3"
+  bucket_name = "source-bucket-${random_id.id.hex}"
+  objects = [
+    {
+      key    = "players.csv"
+      source = "../src/players.csv"
+    }
+  ]
   versioning_enabled = "Enabled"
   cors = [
     {
@@ -264,34 +210,9 @@ module "glue_etl_script_bucket" {
 }
 
 # -----------------------------------------------------------------------------------------
-# Redshift Configuration
-# -----------------------------------------------------------------------------------------
-# module "redshift_serverless" {
-#   source              = "./modules/redshift"
-#   namespace_name      = "incremental-load-namespace"
-#   admin_username      = data.vault_generic_secret.redshift.data["username"]
-#   admin_user_password = data.vault_generic_secret.redshift.data["password"]
-#   db_name             = "incremental-load-db"
-#   workgroups = [
-#     {
-#       workgroup_name      = "incremental-load-workgroup"
-#       base_capacity       = 128
-#       publicly_accessible = false
-#       subnet_ids          = module.public_subnets.subnets[*].id
-#       security_group_ids  = [module.snowflake_security_group.id]
-#       config_parameters = [
-#         {
-#           parameter_key   = "enable_user_activity_logging"
-#           parameter_value = "true"
-#         }
-#       ]
-#     }
-#   ]
-# }
-
-# -----------------------------------------------------------------------------------------
 # Glue Configuration
 # -----------------------------------------------------------------------------------------
+
 resource "aws_iam_role" "glue_crawler_role" {
   name = "glue-crawler-role"
 
@@ -355,33 +276,47 @@ resource "aws_glue_crawler" "crawler" {
   }
 }
 
+resource "aws_iam_role" "snowflake_role" {
+  name = "snowflake-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "glue.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "snowflake_policy" {
+  role       = aws_iam_role.snowflake_role.name
+  policy_arn = "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+}
+
 resource "aws_glue_connection" "snowflake_conn" {
   name            = "snowflake-connection"
   description     = "Glue connection for Snowflake"
-  connection_type = "SNOWFLAKE"
+  connection_type = "JDBC"
 
   # Connection properties for Snowflake
   connection_properties = {
-    JDBC_ENFORCE_SSL       = "true"
-    SNOWFLAKE_URL          = "OWACNSJ-HF93265.snowflakecomputing.com"
-    WAREHOUSE              = "COMPUTE_WH"
-    DATABASE               = "AWSDB"
-    ROLE                   = "ACCOUNTADMIN"
-    AWS_SECRET_ID          = "${module.snowflake_credentials.arn}"
-
-    # JDBC_CONNECTION_URL = "jdbc:snowflake://${var.snowflake_account}.snowflakecomputing.com/?warehouse=${var.snowflake_warehouse}&db=${var.snowflake_database}&schema=${var.snowflake_schema}"
-    # USERNAME            = "${data.vault_generic_secret.snowflake.data["username"]}"
-    # PASSWORD            = "${data.vault_generic_secret.snowflake.data["password"]}"
-    # JDBC_DRIVER_JAR_URI = "s3://${aws_s3_bucket.glue_resources.bucket}/jdbc/snowflake-jdbc-3.13.22.jar"
-    # JDBC_DRIVER_CLASS_NAME = "net.snowflake.client.jdbc.SnowflakeDriver"    
+    JDBC_ENFORCE_SSL       = true
+    JDBC_CONNECTION_URL         = "jdbc:snowflake://OWACNSJ-HF93265.snowflakecomputing.com/"
+    ROLE_ARN               = "${aws_iam_role.snowflake_role.arn}"
+    SECRET_ID = "${module.snowflake_credentials.arn}"
   }
   physical_connection_requirements {
     subnet_id              = module.public_subnets.subnets[0].id
     security_group_id_list = [module.snowflake_security_group.id]
     availability_zone      = module.public_subnets.subnets[0].availability_zone
   }
-}
 
+}
 
 # IAM role for Glue jobs
 resource "aws_iam_role" "glue_job_role" {
@@ -399,11 +334,6 @@ resource "aws_iam_role" "glue_job_role" {
       }
     ]
   })
-}
-
-resource "aws_iam_role_policy_attachment" "glue_job_role_policy_redshift" {
-  role       = aws_iam_role.glue_job_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonRedshiftFullAccess"
 }
 
 resource "aws_iam_role_policy_attachment" "glue_job_role_policy_s3" {
@@ -440,7 +370,7 @@ resource "aws_glue_job" "etl_job" {
   timeout           = 2880
   number_of_workers = 2
   worker_type       = "G.1X"
-  connections       = [aws_glue_connection.redshift_conn.name]
+  connections       = [aws_glue_connection.snowflake_conn.name]
   execution_class   = "STANDARD"
 
   command {
@@ -450,7 +380,7 @@ resource "aws_glue_job" "etl_job" {
   }
 
   notification_property {
-    notify_delay_after = 3 # delay in minutes
+    notify_delay_after = 1 # delay in minutes
   }
 
   default_arguments = {
@@ -460,6 +390,11 @@ resource "aws_glue_job" "etl_job" {
     "--enable-continuous-log-filter"     = "true"
     "--enable-metrics"                   = "true"
     "--enable-auto-scaling"              = "true"
+    "--glue_database_name"               = var.glue_database_name
+    "--glue_table_name"                  = var.glue_table_name
+    "--snowflake_table"                  = "fifa.players"
+    "--snowflake_connection_name"        = aws_glue_connection.snowflake_conn.name
+    "--incremental_column"               = "last_modified"
   }
 
   execution_property {
